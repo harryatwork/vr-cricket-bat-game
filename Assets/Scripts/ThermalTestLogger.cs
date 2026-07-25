@@ -45,7 +45,7 @@ public class ThermalTestLogger : MonoBehaviour
             gameObject.AddComponent<MeshRenderer>();
         }
 
-        displayText.characterSize = 0.12f;
+        displayText.characterSize = 0.06f;
         displayText.fontSize = 48;
         displayText.anchor = TextAnchor.MiddleCenter;
         displayText.alignment = TextAlignment.Center;
