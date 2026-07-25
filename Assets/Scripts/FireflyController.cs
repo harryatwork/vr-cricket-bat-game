@@ -1,9 +1,15 @@
 using UnityEngine;
 
-// Per-firefly gaze-dwell interaction plus slow continuous wandering flight.
+// Per-firefly gaze-dwell interaction plus continuous forward flight with a vertical wave.
 // Movement is physics-driven (Rigidbody velocity, not teleported transform writes) so
 // fireflies actually collide with the room's walls/furniture colliders instead of drifting
 // through them - Harry's explicit requirement ("only rigid... can't go through walls").
+//
+// Flight model: a horizontal heading that drifts gradually (never reverses sharply) combined
+// with a vertical sine wave applied directly to the rigidbody's velocity, so the firefly is
+// always moving forward AND undulating up/down at the same time - not alternating between
+// the two, and never doubling back on itself the way a "pick a random point and beeline to
+// it" approach would.
 //
 // Relies on Cardboard's own CardboardReticlePointer (Packages/com.google.xr.cardboard/
 // Runtime/CardboardReticlePointer.cs) sending OnPointerEnter/OnPointerExit via
@@ -27,10 +33,11 @@ public class FireflyController : MonoBehaviour
     private const float _wanderMinY = 1.0f;
     private const float _wanderMaxY = 2.2f;
 
-    private const float _wanderSpeed = 0.45f; // slow, deliberate drift - not a darting insect
-    private const float _bobAmplitude = 0.1f;
-    private const float _bobFrequency = 0.6f;
-    private const float _arriveThreshold = 0.2f;
+    private const float _forwardSpeed = 0.4f; // slow, deliberate drift - not a darting insect
+    private const float _headingTurnRate = 0.8f; // radians/sec of gradual heading drift
+    private const float _steerBackRate = 1.2f; // how quickly it re-aims at the center once outside the radius
+    private const float _waveAmplitude = 0.35f; // vertical wave amplitude, within the Y bounds
+    private const float _waveFrequency = 0.35f; // waves per second
 
     private Transform _flyVisual;
     private Vector3 _flyBaseScale;
@@ -42,8 +49,10 @@ public class FireflyController : MonoBehaviour
     private ParticleSystem _catchBurst;
     private Rigidbody _rb;
 
-    private Vector3 _wanderTarget;
-    private float _bobPhase;
+    private Vector3 _heading; // horizontal, normalized
+    private float _wavePhase;
+    private float _noiseSeed;
+    private float _centerY;
 
     void Start()
     {
@@ -52,10 +61,16 @@ public class FireflyController : MonoBehaviour
         _flyBaseScale = _flyVisual.localScale;
         _flyVisualBaseLocalPos = _flyVisual.localPosition;
 
+        // The imported fly model's tallest axis is vertical (built standing upright, not in a
+        // natural horizontal flying pose) - rotate it so its body lies flat/horizontal instead.
+        _flyVisual.localRotation = Quaternion.Euler(-90f, 0f, 0f);
+
         _glowLight = GetComponentInChildren<Light>();
         _baseLightIntensity = _glowLight != null ? _glowLight.intensity : 1f;
         _catchBurst = GetComponentInChildren<ParticleSystem>();
-        _bobPhase = Random.Range(0f, Mathf.PI * 2f);
+        _wavePhase = Random.Range(0f, Mathf.PI * 2f);
+        _noiseSeed = Random.Range(0f, 1000f);
+        _centerY = (_wanderMinY + _wanderMaxY) * 0.5f;
 
         _rb = GetComponent<Rigidbody>();
         _rb.useGravity = false;
@@ -65,16 +80,12 @@ public class FireflyController : MonoBehaviour
         _rb.linearDamping = 2f; // settle quickly rather than sliding/bouncing around after a wall hit
 
         _rb.position = RandomPointInBounds();
-        PickNewWanderTarget();
+        float startAngle = Random.Range(0f, Mathf.PI * 2f);
+        _heading = new Vector3(Mathf.Cos(startAngle), 0f, Mathf.Sin(startAngle));
     }
 
     void Update()
     {
-        // Cosmetic bob applied to the visual child only, never to the physics body itself -
-        // keeps the rigidbody's actual collision position exactly where physics resolves it.
-        _bobPhase += Time.deltaTime * _bobFrequency * Mathf.PI * 2f;
-        _flyVisual.localPosition = _flyVisualBaseLocalPos + new Vector3(0f, Mathf.Sin(_bobPhase) * _bobAmplitude, 0f);
-
         if (_isDwelling)
         {
             _dwellTimer += Time.deltaTime;
@@ -100,20 +111,33 @@ public class FireflyController : MonoBehaviour
             return;
         }
 
-        Vector3 toTarget = _wanderTarget - _rb.position;
-        if (toTarget.magnitude <= _arriveThreshold)
+        // Gentle continuous heading drift (never a sharp reversal) using smooth noise, so the
+        // flight path curves naturally instead of holding a perfectly straight line forever.
+        float turn = (Mathf.PerlinNoise(Time.time * 0.25f, _noiseSeed) - 0.5f) * 2f * _headingTurnRate * Time.fixedDeltaTime;
+        _heading = Quaternion.Euler(0f, turn * Mathf.Rad2Deg, 0f) * _heading;
+
+        // If drifting outside the wander radius, gradually steer back toward the center rather
+        // than snapping to a new point (which would mean flying backward).
+        Vector3 toCenter = WanderCenter - _rb.position;
+        toCenter.y = 0f;
+        if (toCenter.magnitude > _wanderRadiusXZ)
         {
-            PickNewWanderTarget();
-            toTarget = _wanderTarget - _rb.position;
+            Vector3 desiredDir = toCenter.normalized;
+            _heading = Vector3.Slerp(_heading, desiredDir, Time.fixedDeltaTime * _steerBackRate).normalized;
         }
 
-        Vector3 dir = toTarget.normalized;
-        _rb.linearVelocity = dir * _wanderSpeed;
+        // Vertical wave applied directly to velocity (derivative of a sine position curve) so
+        // the actual body continuously undulates up/down while always moving forward
+        // horizontally - both happen at once, never alternating.
+        _wavePhase += Time.fixedDeltaTime * _waveFrequency * Mathf.PI * 2f;
+        float targetY = _centerY + Mathf.Sin(_wavePhase) * _waveAmplitude;
+        float verticalVelocity = (targetY - _rb.position.y) * 2f; // gently correct toward the wave curve
 
-        if (dir.sqrMagnitude > 0.0001f)
-        {
-            transform.forward = Vector3.Lerp(transform.forward, dir, Time.fixedDeltaTime * 2f);
-        }
+        Vector3 vel = _heading * _forwardSpeed;
+        vel.y = verticalVelocity;
+        _rb.linearVelocity = vel;
+
+        transform.forward = Vector3.Lerp(transform.forward, _heading, Time.fixedDeltaTime * 2f);
     }
 
     // Called by CardboardReticlePointer via SendMessage when gaze enters this object.
@@ -149,18 +173,14 @@ public class FireflyController : MonoBehaviour
             FireflyGameManager.Instance.OnFireflyCaught();
         }
 
-        // Respawn elsewhere in the wander zone and resume wandering, rather than vanishing
-        // and reappearing in the same spot.
+        // Respawn elsewhere in the wander zone and resume flying, rather than vanishing and
+        // reappearing in the same spot.
         _rb.position = RandomPointInBounds();
         _rb.linearVelocity = Vector3.zero;
-        PickNewWanderTarget();
+        float restartAngle = Random.Range(0f, Mathf.PI * 2f);
+        _heading = new Vector3(Mathf.Cos(restartAngle), 0f, Mathf.Sin(restartAngle));
         if (_glowLight != null) _glowLight.intensity = _baseLightIntensity;
         _flyVisual.localScale = _flyBaseScale;
-    }
-
-    private void PickNewWanderTarget()
-    {
-        _wanderTarget = RandomPointInBounds();
     }
 
     private Vector3 RandomPointInBounds()

@@ -25,6 +25,10 @@ public class ThermalTestLogger : MonoBehaviour
 
     void Start()
     {
+        // A VR session has no touch input to reset Android's own screen-timeout, so without
+        // this the OS locks the screen mid-session even while the app is actively rendering.
+        Screen.sleepTimeout = SleepTimeout.NeverSleep;
+
         // Force an uncapped frame pacing target - Android/Unity defaults observed to cap
         // near 30fps otherwise (vSyncCount>0 makes targetFrameRate get ignored, so both
         // must be set together). 2026-07-25: confirmed via adb dumpsys display that this

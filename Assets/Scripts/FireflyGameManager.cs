@@ -23,7 +23,7 @@ public class FireflyGameManager : MonoBehaviour
         if (scoreText == null) scoreText = gameObject.AddComponent<TextMesh>();
         if (GetComponent<MeshRenderer>() == null) gameObject.AddComponent<MeshRenderer>();
 
-        scoreText.characterSize = 0.12f;
+        scoreText.characterSize = 0.06f;
         scoreText.fontSize = 48;
         scoreText.anchor = TextAnchor.MiddleCenter;
         scoreText.alignment = TextAlignment.Center;
